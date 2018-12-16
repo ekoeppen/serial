@@ -1,0 +1,5 @@
+serial (1.0.0) bionic; urgency=low
+
+  * Initial Release.
+
+ -- Eckhart Koeppen <eck@40hz.org>  Sun, 16 Dec 2018 12:41:09 +0200

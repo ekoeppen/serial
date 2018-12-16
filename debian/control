@@ -1,0 +1,13 @@
+Source: serial
+Section: utils
+Priority: optional
+Build-Depends: debhelper (>= 10)
+Maintainer: Eckhart Koeppen <eck@40hz.org>
+Homepage: https://github.com/ekoeppen/serial
+Standards-Version: 4.1.2
+
+Package: serial
+Architecture: amd64
+Depends: ${misc:Depends}
+Description: Simple serial console
+ A simple console program for serial connections.
