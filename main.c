@@ -201,12 +201,12 @@ void configure_terminal(int baud)
 	tcflush(terminal, TCIFLUSH);
 	tcsetattr(terminal, TCSANOW, &options);
 
-	set_modem_lines(0,
-			(opt_dtr == DTR_INIT_HIGH ? TIOCM_DTR : 0) |
-			(opt_rts == RTS_INIT_HIGH ? TIOCM_RTS : 0));
 	set_modem_lines(1,
 			(opt_dtr == DTR_INIT_LOW ? TIOCM_DTR : 0) |
 			(opt_rts == RTS_INIT_LOW ? TIOCM_RTS : 0));
+	set_modem_lines(0,
+			(opt_dtr == DTR_INIT_HIGH ? TIOCM_DTR : 0) |
+			(opt_rts == RTS_INIT_HIGH ? TIOCM_RTS : 0));
 }
 
 void unconfigure_input(void)
