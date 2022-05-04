@@ -21,6 +21,10 @@
 #define RTS_TOGGLE_CHAR 'r'
 #define BREAK_CHAR 'b'
 
+#define EXIT_OK 0
+#define EXIT_TIMEOUT 1
+#define EXIT_ERROR 2
+
 #define RESET_SEQUENCE "\033c"
 
 #define DTR_INIT_NONE 0
@@ -33,6 +37,9 @@
 #define RTS_INIT_LOW 2
 #define RTS_PULSE_WIDTH 100
 
+#define SELECT_TIMEOUT_US 500000
+
+static int timeout;
 static int in;
 static int out;
 static int terminal;
@@ -47,7 +54,8 @@ static int opt_translate = 0;
 static int opt_flow_control = 0;
 static int opt_dtr = DTR_INIT_NONE;
 static int opt_rts = RTS_INIT_NONE;
-static char *options = "acxtdDrRf";
+static int opt_timeout = 0;
+static char *options = "acxtdDrRfT:";
 
 void set_modem_lines(int on, int lines)
 {
@@ -116,7 +124,7 @@ bool transfer_to_terminal(void)
 				break;
 			case RESET_CHAR:
 				write(out, RESET_SEQUENCE,
-				      sizeof(RESET_SEQUENCE));
+						sizeof(RESET_SEQUENCE));
 				break;
 			case DTR_TOGGLE_CHAR:
 				toggle(TIOCM_DTR, opt_dtr == DTR_INIT_HIGH, DTR_PULSE_WIDTH);
@@ -150,8 +158,8 @@ bool transfer_from_terminal(void)
 		if (opt_ascii) {
 			for (i = 0; i < byte_count; i++) {
 				if (buffer[i] > 128 ||
-				    (buffer[i] < ' ' &&
-				     buffer[i] != '\t' && buffer[i] != '\r' && buffer[i] != '\n'))
+					(buffer[i] < ' ' &&
+						buffer[i] != '\t' && buffer[i] != '\r' && buffer[i] != '\n'))
 					buffer[i] = '.';
 			}
 		}
@@ -268,6 +276,10 @@ void handle_cmd_line(int argc, char **argv)
 		case 'R':
 			opt_rts = RTS_INIT_LOW;
 			break;
+		case 'T':
+			opt_timeout = 1;
+			timeout = atoi(optarg) * SELECT_TIMEOUT_US;
+			break;
 		case '?':
 			exit(1);
 			break;
@@ -290,13 +302,13 @@ void handle_cmd_line(int argc, char **argv)
 		speed = atoi(argv[optind]);
 	else
 		speed = 115200;
-
 }
 
 int main(int argc, char **argv)
 {
-	struct timeval timeout;
+	struct timeval select_timeout;
 	fd_set readfds;
+	int r = EXIT_OK;
 
 	handle_cmd_line(argc, argv);
 
@@ -318,19 +330,28 @@ int main(int argc, char **argv)
 		FD_SET(terminal, &readfds);
 		FD_SET(in, &readfds);
 
-		timeout.tv_sec  = 0;
-		timeout.tv_usec = 500000;
+		select_timeout.tv_sec  = 0;
+		select_timeout.tv_usec = SELECT_TIMEOUT_US;
 
-		if (select(FD_SETSIZE, &readfds, NULL, NULL, &timeout) == -1) {
+		if (select(FD_SETSIZE, &readfds, NULL, NULL, &select_timeout) == -1) {
+			r = EXIT_ERROR;
 			break;
 		} else {
 			if (FD_ISSET(terminal, &readfds) &&
-			    transfer_from_terminal() == false)
+				transfer_from_terminal() == false)
 				break;
 
 			if (FD_ISSET(in, &readfds) &&
-			    transfer_to_terminal() == false)
+				transfer_to_terminal() == false)
 				break;
+
+			if (opt_timeout) {
+				timeout -= SELECT_TIMEOUT_US;
+				if (timeout <= 0) {
+					r = EXIT_TIMEOUT;
+					break;
+				}
+			}
 		}
 	}
 
@@ -342,6 +363,6 @@ int main(int argc, char **argv)
 	close(in);
 	close(out);
 
-	return 0;
+	return r;
 }
 
