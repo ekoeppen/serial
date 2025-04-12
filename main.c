@@ -5,7 +5,6 @@
 #include <time.h>
 #include <fcntl.h>
 #include <termios.h>
-#include <errno.h>
 #include <stdbool.h>
 #include <signal.h>
 #include <sys/types.h>
@@ -43,7 +42,7 @@
 static int timeout;
 static int in;
 static int out;
-static int terminal;
+static int serial;
 static struct termios old_input_options;
 static int escape_state;
 static int speed;
@@ -64,19 +63,19 @@ void set_modem_lines(int on, int lines)
 {
 	unsigned int status;
 
-	ioctl(terminal, TIOCMGET, &status);
+	ioctl(serial, TIOCMGET, &status);
 	if (on)
 		status |= lines;
 	else
 		status &= ~lines;
-	ioctl(terminal, TIOCMSET, &status);
+	ioctl(serial, TIOCMSET, &status);
 }
 
 int clear_to_send(void)
 {
 	unsigned int status;
 
-	ioctl(terminal, TIOCMGET, &status);
+	ioctl(serial, TIOCMGET, &status);
 	return !(status & TIOCM_CTS);
 }
 
@@ -91,16 +90,16 @@ void toggle(int line, int active_low, int delay_ms)
 
 void send_break(void)
 {
-	tcsendbreak(terminal, 0);
+	tcsendbreak(serial, 0);
 }
 
 void send_data(char *data, unsigned int count)
 {
 	while (opt_flow_control && !clear_to_send());
-	write(terminal, data, count);
+	write(serial, data, count);
 }
 
-bool transfer_to_terminal(void)
+bool transfer_to_serial(void)
 {
 	char c;
 	bool r = true;
@@ -149,14 +148,14 @@ bool transfer_to_terminal(void)
 	return r;
 }
 
-bool transfer_from_terminal(void)
+bool transfer_from_serial(void)
 {
 	unsigned char buffer[512];
 	int i;
 	int byte_count;
 	bool r = true;
 
-	byte_count = read(terminal, buffer, sizeof(buffer));
+	byte_count = read(serial, buffer, sizeof(buffer));
 	if (byte_count > 0) {
 		if (opt_ascii) {
 			for (i = 0; i < byte_count; i++) {
@@ -191,12 +190,12 @@ void configure_input(void)
 	tcsetattr(in, TCSANOW, &options);
 }
 
-void configure_terminal(int baud)
+void configure_serial(int baud)
 {
 	struct termios options;
 	unsigned int status;
 
-	tcgetattr(terminal, &options);
+	tcgetattr(serial, &options);
 
 	options.c_oflag &= ~OPOST;
 	options.c_iflag &= ~INLCR & ~ICRNL & ~INPCK;
@@ -210,20 +209,20 @@ void configure_terminal(int baud)
 	options.c_lflag = 0;
 
 	cfsetspeed(&options, baud);
-	tcflush(terminal, TCIFLUSH);
-	tcsetattr(terminal, TCSANOW, &options);
+	tcflush(serial, TCIFLUSH);
+	tcsetattr(serial, TCSANOW, &options);
 
-	ioctl(terminal, TIOCMGET, &status);
+	ioctl(serial, TIOCMGET, &status);
 	status &= ~(TIOCM_DTR | TIOCM_RTS);
 	if (opt_rts == RTS_INIT_LOW) {
 		usleep(250 * 1000);
 		status |= TIOCM_RTS;
-		ioctl(terminal, TIOCMSET, &status);
+		ioctl(serial, TIOCMSET, &status);
 	}
 	if (opt_dtr == DTR_INIT_LOW) {
 		usleep(250 * 1000);
 		status |= TIOCM_DTR;
-		ioctl(terminal, TIOCMSET, &status);
+		ioctl(serial, TIOCMSET, &status);
 	}
 
 	if (opt_pulse_rts) {
@@ -326,7 +325,7 @@ void handle_cmd_line(int argc, char **argv)
 		}
 		optind++;
 	} else {
-		printf("Please specify a terminal.\n");
+		printf("Please specify a device.\n");
 		exit(1);
 	}
 	if (optind < argc)
@@ -345,13 +344,13 @@ int main(int argc, char **argv)
 
 	in = dup(0);
 	out = dup(1);
-	terminal = open(terminal_device, O_RDWR | O_NOCTTY | O_NONBLOCK);
-	if (terminal == -1) {
-		perror("Failed to open terminal");
+	serial = open(terminal_device, O_RDWR | O_NOCTTY | O_NONBLOCK);
+	if (serial == -1) {
+		perror("Failed to open device");
 		exit(3);
 	}
 
-	configure_terminal(speed);
+	configure_serial(speed);
 	configure_input();
 
 	setup_signal_handlers();
@@ -359,7 +358,7 @@ int main(int argc, char **argv)
 	timeout = time(NULL) + opt_timeout;
 	for (;;) {
 		FD_ZERO(&readfds);
-		FD_SET(terminal, &readfds);
+		FD_SET(serial, &readfds);
 		FD_SET(in, &readfds);
 
 		select_timeout.tv_sec  = 0;
@@ -370,10 +369,10 @@ int main(int argc, char **argv)
 			break;
 		} else {
 			if (FD_ISSET(in, &readfds))
-				if (transfer_to_terminal() == false) break;
+				if (transfer_to_serial() == false) break;
 
-			if (FD_ISSET(terminal, &readfds)) {
-				if (transfer_from_terminal() == false) break;
+			if (FD_ISSET(serial, &readfds)) {
+				if (transfer_from_serial() == false) break;
 				timeout = time(NULL) + opt_timeout;
 			} else {
 				if (opt_timeout && time(NULL) > timeout) {
@@ -388,7 +387,7 @@ int main(int argc, char **argv)
 	if (opt_reset)
 		write(out, RESET_SEQUENCE, sizeof(RESET_SEQUENCE));
 
-	close(terminal);
+	close(serial);
 	close(in);
 	close(out);
 

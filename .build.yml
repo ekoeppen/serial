@@ -6,4 +6,7 @@ environment:
 sources:
   - https://git.sr.ht/~ekoeppen/build-scripts
 tasks:
+  - compile: |-
+      cd $REPO
+      make
   - mirror-to-github: ./build-scripts/github-mirror $REPO
