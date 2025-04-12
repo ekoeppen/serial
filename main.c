@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <errno.h>
@@ -52,10 +53,12 @@ static int opt_reset = 0;
 static int opt_exit_ctrl_c = 0;
 static int opt_translate = 0;
 static int opt_flow_control = 0;
-static int opt_dtr = DTR_INIT_NONE;
-static int opt_rts = RTS_INIT_NONE;
+static int opt_dtr = DTR_INIT_HIGH;
+static int opt_rts = RTS_INIT_HIGH;
+static int opt_pulse_rts = 0;
+static int opt_pulse_dts = 0;
 static int opt_timeout = 0;
-static char *options = "acxtdDrRfT:";
+static char *options = "acxtdDrRfT:p:";
 
 void set_modem_lines(int on, int lines)
 {
@@ -191,6 +194,7 @@ void configure_input(void)
 void configure_terminal(int baud)
 {
 	struct termios options;
+	unsigned int status;
 
 	tcgetattr(terminal, &options);
 
@@ -209,12 +213,28 @@ void configure_terminal(int baud)
 	tcflush(terminal, TCIFLUSH);
 	tcsetattr(terminal, TCSANOW, &options);
 
-	set_modem_lines(1,
-			(opt_dtr == DTR_INIT_LOW ? TIOCM_DTR : 0) |
-			(opt_rts == RTS_INIT_LOW ? TIOCM_RTS : 0));
-	set_modem_lines(0,
-			(opt_dtr == DTR_INIT_HIGH ? TIOCM_DTR : 0) |
-			(opt_rts == RTS_INIT_HIGH ? TIOCM_RTS : 0));
+	ioctl(terminal, TIOCMGET, &status);
+	status &= ~(TIOCM_DTR | TIOCM_RTS);
+	if (opt_rts == RTS_INIT_LOW) {
+		usleep(250 * 1000);
+		status |= TIOCM_RTS;
+		ioctl(terminal, TIOCMSET, &status);
+	}
+	if (opt_dtr == DTR_INIT_LOW) {
+		usleep(250 * 1000);
+		status |= TIOCM_DTR;
+		ioctl(terminal, TIOCMSET, &status);
+	}
+
+	if (opt_pulse_rts) {
+		usleep(500 * 1000);
+		toggle(TIOCM_RTS, opt_rts == RTS_INIT_HIGH, RTS_PULSE_WIDTH);
+	}
+
+	if (opt_pulse_dts) {
+		usleep(500 * 1000);
+		toggle(TIOCM_DTR, opt_rts == DTR_INIT_HIGH, RTS_PULSE_WIDTH);
+	}
 }
 
 void unconfigure_input(void)
@@ -277,8 +297,19 @@ void handle_cmd_line(int argc, char **argv)
 			opt_rts = RTS_INIT_LOW;
 			break;
 		case 'T':
-			opt_timeout = 1;
-			timeout = atoi(optarg) * SELECT_TIMEOUT_US;
+			opt_timeout = atoi(optarg);
+			break;
+		case 'p':
+			switch (optarg[0]) {
+				case 'd':
+					opt_pulse_dts = 1;
+					break;
+				case 'r':
+					opt_pulse_rts = 1;
+					break;
+				default:
+					break;
+			}
 			break;
 		case '?':
 			exit(1);
@@ -325,6 +356,7 @@ int main(int argc, char **argv)
 
 	setup_signal_handlers();
 	escape_state = 0;
+	timeout = time(NULL) + opt_timeout;
 	for (;;) {
 		FD_ZERO(&readfds);
 		FD_SET(terminal, &readfds);
@@ -337,17 +369,14 @@ int main(int argc, char **argv)
 			r = EXIT_ERROR;
 			break;
 		} else {
-			if (FD_ISSET(terminal, &readfds) &&
-				transfer_from_terminal() == false)
-				break;
+			if (FD_ISSET(in, &readfds))
+				if (transfer_to_terminal() == false) break;
 
-			if (FD_ISSET(in, &readfds) &&
-				transfer_to_terminal() == false)
-				break;
-
-			if (opt_timeout) {
-				timeout -= SELECT_TIMEOUT_US;
-				if (timeout <= 0) {
+			if (FD_ISSET(terminal, &readfds)) {
+				if (transfer_from_terminal() == false) break;
+				timeout = time(NULL) + opt_timeout;
+			} else {
+				if (opt_timeout && time(NULL) > timeout) {
 					r = EXIT_TIMEOUT;
 					break;
 				}
