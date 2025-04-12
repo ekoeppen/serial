@@ -20,6 +20,8 @@
 #define DTR_TOGGLE_CHAR 'd'
 #define RTS_TOGGLE_CHAR 'r'
 #define BREAK_CHAR 'b'
+#define XON_CHAR 0x11
+#define XOFF_CHAR 0x13
 
 #define EXIT_OK 0
 #define EXIT_TIMEOUT 1
@@ -45,19 +47,21 @@ static int out;
 static int serial;
 static struct termios old_input_options;
 static int escape_state;
+static int xoff = 0;
 static int speed;
 static char *terminal_device;
 static int opt_ascii = 0;
 static int opt_reset = 0;
 static int opt_exit_ctrl_c = 0;
 static int opt_translate = 0;
-static int opt_flow_control = 0;
+static int opt_hard_flow_control = 0;
+static int opt_soft_flow_control = 0;
 static int opt_dtr = DTR_INIT_HIGH;
 static int opt_rts = RTS_INIT_HIGH;
 static int opt_pulse_rts = 0;
 static int opt_pulse_dts = 0;
 static int opt_timeout = 0;
-static char *options = "acxtdDrRfT:p:";
+static char *options = "acxtdDrRfsT:p:";
 
 void set_modem_lines(int on, int lines) {
   unsigned int status;
@@ -88,78 +92,88 @@ void toggle(int line, int active_low, int delay_ms) {
 void send_break(void) { tcsendbreak(serial, 0); }
 
 void send_data(char *data, unsigned int count) {
-  while (opt_flow_control && !clear_to_send())
-    ;
+  if (opt_hard_flow_control) {
+    while (!clear_to_send())
+      ;
+  }
   write(serial, data, count);
 }
 
 bool transfer_to_serial(void) {
   char c;
-  bool r = true;
   int byte_count;
 
   byte_count = read(in, &c, sizeof(c));
-  if (byte_count > 0) {
-    if (!escape_state) {
-      if (opt_exit_ctrl_c && c == CTRL_C_CHAR) {
-        r = false;
-      } else if (c != ESCAPE_CHAR) {
-        if (!opt_translate || c != '\n') {
-          send_data(&c, byte_count);
-        } else {
-          send_data("\r\n", 2);
-        }
-      } else {
-        escape_state = 1;
-      }
-    } else {
-      switch (c) {
-      case EXIT_CHAR:
-        r = false;
-        break;
-      case RESET_CHAR:
-        write(out, RESET_SEQUENCE, sizeof(RESET_SEQUENCE));
-        break;
-      case DTR_TOGGLE_CHAR:
-        toggle(TIOCM_DTR, opt_dtr == DTR_INIT_HIGH, DTR_PULSE_WIDTH);
-        break;
-      case RTS_TOGGLE_CHAR:
-        toggle(TIOCM_RTS, opt_rts == RTS_INIT_HIGH, RTS_PULSE_WIDTH);
-        break;
-      case BREAK_CHAR:
-        send_break();
-        break;
-      default:
-        send_data(&c, byte_count);
-      }
-      escape_state = 0;
-    }
-  } else {
-    r = false;
+  if (byte_count <= 0) {
+    return false;
   }
-  return r;
+
+  if (!escape_state) {
+    if (opt_exit_ctrl_c && c == CTRL_C_CHAR) {
+      return false;
+    }
+    if (c == ESCAPE_CHAR) {
+      escape_state = 1;
+      return true;
+    }
+
+    if (!opt_translate || c != '\n') {
+      send_data(&c, byte_count);
+    } else {
+      send_data("\r\n", 2);
+    }
+    return true;
+  }
+
+  switch (c) {
+  case EXIT_CHAR:
+    return false;
+  case RESET_CHAR:
+    write(out, RESET_SEQUENCE, sizeof(RESET_SEQUENCE));
+    break;
+  case DTR_TOGGLE_CHAR:
+    toggle(TIOCM_DTR, opt_dtr == DTR_INIT_HIGH, DTR_PULSE_WIDTH);
+    break;
+  case RTS_TOGGLE_CHAR:
+    toggle(TIOCM_RTS, opt_rts == RTS_INIT_HIGH, RTS_PULSE_WIDTH);
+    break;
+  case BREAK_CHAR:
+    send_break();
+    break;
+  default:
+    send_data(&c, byte_count);
+  }
+  escape_state = 0;
+  return true;
 }
 
 bool transfer_from_serial(void) {
   unsigned char buffer[512];
-  int i;
   int byte_count;
-  bool r = true;
 
   byte_count = read(serial, buffer, sizeof(buffer));
-  if (byte_count > 0) {
-    if (opt_ascii) {
-      for (i = 0; i < byte_count; i++) {
-        if (buffer[i] > 128 || (buffer[i] < ' ' && buffer[i] != '\t' &&
-                                buffer[i] != '\r' && buffer[i] != '\n'))
-          buffer[i] = '.';
-      }
-    }
-    write(out, buffer, byte_count);
-  } else {
-    r = false;
+  if (byte_count <= 0) {
+    return false;
   }
-  return r;
+
+  for (size_t i = 0; i < byte_count; i++) {
+    if (opt_soft_flow_control) {
+      if (buffer[i] == XOFF_CHAR) {
+        xoff = 1;
+        continue;
+      }
+      if (buffer[i] == XON_CHAR) {
+        xoff = 0;
+        continue;
+      }
+      if (opt_ascii &&
+          (buffer[i] > 128 || (buffer[i] < ' ' && buffer[i] != '\t' &&
+                               buffer[i] != '\r' && buffer[i] != '\n')))
+        buffer[i] = '.';
+    }
+    write(out, &buffer[i], 1);
+  }
+  return true;
 }
 
 void configure_input(void) {
@@ -260,7 +274,10 @@ void handle_cmd_line(int argc, char **argv) {
       opt_exit_ctrl_c = 1;
       break;
     case 'f':
-      opt_flow_control = 1;
+      opt_hard_flow_control = 1;
+      break;
+    case 's':
+      opt_soft_flow_control = 1;
       break;
     case 't':
       opt_translate = 1;
@@ -348,27 +365,30 @@ int main(int argc, char **argv) {
     if (select(FD_SETSIZE, &readfds, NULL, NULL, &select_timeout) == -1) {
       r = EXIT_ERROR;
       break;
-    } else {
-      if (FD_ISSET(in, &readfds))
-        if (transfer_to_serial() == false)
-          break;
+    }
 
-      if (FD_ISSET(serial, &readfds)) {
-        if (transfer_from_serial() == false)
-          break;
-        timeout = time(NULL) + opt_timeout;
-      } else {
-        if (opt_timeout && time(NULL) > timeout) {
-          r = EXIT_TIMEOUT;
-          break;
-        }
+    if (FD_ISSET(in, &readfds) && !(opt_soft_flow_control && xoff) &&
+        transfer_to_serial() == false) {
+      break;
+    }
+
+    if (FD_ISSET(serial, &readfds)) {
+      if (transfer_from_serial() == false) {
+        break;
       }
+      timeout = time(NULL) + opt_timeout;
+    }
+
+    if (opt_timeout && time(NULL) > timeout) {
+      r = EXIT_TIMEOUT;
+      break;
     }
   }
 
   unconfigure_input();
-  if (opt_reset)
+  if (opt_reset) {
     write(out, RESET_SEQUENCE, sizeof(RESET_SEQUENCE));
+  }
 
   close(serial);
   close(in);
